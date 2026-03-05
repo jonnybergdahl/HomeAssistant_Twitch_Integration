@@ -1,0 +1,13 @@
+{
+  "domain": "twitch",
+  "name": "Twitch",
+  "codeowners": ["@jonnybergdahl"],
+  "config_flow": true,
+  "dependencies": ["application_credentials"],
+  "documentation": "https://github.com/jonnybergdahl/HomeAssistant_Twitch_Integration",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "loggers": ["twitch"],
+  "requirements": ["twitchAPI==4.2.1"],
+  "version": "0.1.0"
+}
