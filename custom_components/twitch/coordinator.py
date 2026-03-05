@@ -337,7 +337,7 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
                 for chunk in chunk_list(live_ids, 100):
                     async for stream in self.twitch.get_streams(user_id=chunk):
                         self._stream_data[stream.user_id] = stream
-        except TwitchAuthorizationException as err:
+        except (TwitchAuthorizationException, ValueError) as err:
             ir.async_create_issue(
                 self.hass,
                 DOMAIN,
