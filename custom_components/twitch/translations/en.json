@@ -96,5 +96,11 @@
         "oauth2_implementation_unavailable": {
             "message": "OAuth2 implementation unavailable, will retry"
         }
+    },
+    "issues": {
+        "oauth_token_expired": {
+            "description": "The authentication token for your Twitch account **{title}** has expired. Please re-authenticate the integration to restore functionality.",
+            "title": "Twitch authentication expired for {title}"
+        }
     }
 }

@@ -19,6 +19,7 @@ from twitchAPI.type import TwitchAPIException, TwitchAuthorizationException, Twi
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.config_entry_oauth2_flow import OAuth2Session
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -283,6 +284,15 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
                     async for stream in self.twitch.get_streams(user_id=chunk):
                         self._stream_data[stream.user_id] = stream
         except TwitchAuthorizationException as err:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                f"oauth_token_expired_{self.config_entry.entry_id}",
+                is_fixable=False,
+                severity=ir.IssueSeverity.ERROR,
+                translation_key="oauth_token_expired",
+                translation_placeholders={"title": self.config_entry.title},
+            )
             raise ConfigEntryAuthFailed("Twitch authorization failed") from err
 
         return self._build_data()

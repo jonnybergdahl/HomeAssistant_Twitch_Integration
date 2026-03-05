@@ -92,6 +92,12 @@
       }
     }
   },
+  "issues": {
+    "oauth_token_expired": {
+      "title": "Twitch authentication expired for {title}",
+      "description": "The authentication token for your Twitch account **{title}** has expired. Please re-authenticate the integration to restore functionality."
+    }
+  },
   "exceptions": {
     "oauth2_implementation_unavailable": {
       "message": "[%key:common::exceptions::oauth2_implementation_unavailable::message%]"

@@ -10,6 +10,7 @@ from twitchAPI.twitch import Twitch
 from homeassistant.const import CONF_ACCESS_TOKEN, CONF_TOKEN
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.config_entry_oauth2_flow import (
     ImplementationUnavailableError,
     LocalOAuth2Implementation,
@@ -38,12 +39,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: TwitchConfigEntry) -> bo
         await session.async_ensure_token_valid()
     except ClientResponseError as err:
         if 400 <= err.status < 500:
+            ir.async_create_issue(
+                hass,
+                DOMAIN,
+                f"oauth_token_expired_{entry.entry_id}",
+                is_fixable=False,
+                severity=ir.IssueSeverity.ERROR,
+                translation_key="oauth_token_expired",
+                translation_placeholders={"title": entry.title},
+            )
             raise ConfigEntryAuthFailed(
                 "OAuth session is not valid, reauth required"
             ) from err
         raise ConfigEntryNotReady from err
     except ClientError as err:
         raise ConfigEntryNotReady from err
+
+    ir.async_delete_issue(hass, DOMAIN, f"oauth_token_expired_{entry.entry_id}")
 
     access_token = entry.data[CONF_TOKEN][CONF_ACCESS_TOKEN]
     client = Twitch(
@@ -71,3 +83,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: TwitchConfigEntry) -> b
     """Unload Twitch config entry."""
     await entry.runtime_data.async_shutdown()
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: TwitchConfigEntry) -> None:
+    """Clean up issues when a config entry is removed."""
+    ir.async_delete_issue(hass, DOMAIN, f"oauth_token_expired_{entry.entry_id}")
