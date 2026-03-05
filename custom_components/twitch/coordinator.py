@@ -14,16 +14,22 @@ from twitchAPI.object.api import (
 )
 from twitchAPI.object.eventsub import StreamOfflineEvent, StreamOnlineEvent
 from twitchAPI.twitch import Twitch
-from twitchAPI.type import TwitchAPIException, TwitchAuthorizationException, TwitchResourceNotFound
+from twitchAPI.type import (
+    EventSubSubscriptionError,
+    TwitchAPIException,
+    TwitchAuthorizationException,
+    TwitchResourceNotFound,
+)
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.config_entry_oauth2_flow import OAuth2Session
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import CONF_CHANNELS, DOMAIN, LOGGER, OAUTH_SCOPES
+from .const import CONF_ALL_CHANNELS, CONF_CHANNELS, DOMAIN, LOGGER, OAUTH_SCOPES
 
 type TwitchConfigEntry = ConfigEntry[TwitchCoordinator]
 
@@ -96,6 +102,7 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
         self.session = session
         self._slow_data: dict[str, _TwitchSlowData] = {}
         self._last_slow_update: datetime | None = None
+        self._slow_update_deferred = False
         self._stream_data: dict[str, Stream] = {}
         self._eventsub: EventSubWebsocket | None = None
 
@@ -133,20 +140,28 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
         self._eventsub = EventSubWebsocket(self.twitch)
         await self.hass.async_add_executor_job(self._eventsub.start)
 
-        await asyncio.gather(
-            *(
-                coro
-                for user in self.users
-                for coro in (
-                    self._eventsub.listen_stream_online(
-                        user.id, self._async_on_stream_online
-                    ),
-                    self._eventsub.listen_stream_offline(
-                        user.id, self._async_on_stream_offline
-                    ),
+        try:
+            await asyncio.gather(
+                *(
+                    coro
+                    for user in self.users
+                    for coro in (
+                        self._eventsub.listen_stream_online(
+                            user.id, self._async_on_stream_online
+                        ),
+                        self._eventsub.listen_stream_offline(
+                            user.id, self._async_on_stream_offline
+                        ),
+                    )
                 )
             )
-        )
+        except EventSubSubscriptionError:
+            LOGGER.warning(
+                "EventSub subscription limit exceeded; falling back to polling"
+            )
+            await self._eventsub.stop()
+            self._eventsub = None
+            return
 
         LOGGER.debug("EventSub WebSocket started for %d channel(s)", len(self.users))
 
@@ -222,6 +237,42 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
                 user_id=self.current_user.id, first=100
             )
         }
+
+        # Auto-discover new followed channels when tracking all
+        if self.config_entry.options.get(CONF_ALL_CHANNELS, False):
+            tracked_logins = {u.login for u in self.users}
+            new_logins = [
+                f.broadcaster_login
+                for f in follows.values()
+                if f.broadcaster_login not in tracked_logins
+            ]
+            if new_logins:
+                LOGGER.debug("Discovered %d new followed channel(s): %s", len(new_logins), new_logins)
+                new_users: list[TwitchUser] = []
+                for chunk in chunk_list(new_logins, 100):
+                    new_users.extend(
+                        [u async for u in self.twitch.get_users(logins=chunk)]
+                    )
+                self.users.extend(new_users)
+                # Fetch initial stream status for new channels
+                new_ids = [u.id for u in new_users]
+                for chunk in chunk_list(new_ids, 100):
+                    async for stream in self.twitch.get_streams(user_id=chunk):
+                        self._stream_data[stream.user_id] = stream
+                # Update stored channel list
+                all_logins = [
+                    u.login for u in self.users if u.id != self.current_user.id
+                ]
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    options={**self.config_entry.options, CONF_CHANNELS: all_logins},
+                )
+                async_dispatcher_send(
+                    self.hass,
+                    f"{DOMAIN}_new_channels_{self.config_entry.entry_id}",
+                    [u.id for u in new_users],
+                )
+
         for channel in self.users:
             LOGGER.debug("Fetching slow data for channel: %s", channel.display_name)
             followers = await self.twitch.get_channel_followers(channel.id)
@@ -269,9 +320,12 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
                 False,
             )
 
-            # Run the slow update on first call and then once per hour
+            # Defer the slow update on the first call so it doesn't block
+            # startup. It will run on the next polling cycle instead.
             now = datetime.now(UTC)
-            if (
+            if self._last_slow_update is None and not self._slow_update_deferred:
+                self._slow_update_deferred = True
+            elif (
                 self._last_slow_update is None
                 or now - self._last_slow_update >= _SLOW_UPDATE_INTERVAL
             ):

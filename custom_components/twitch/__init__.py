@@ -18,7 +18,7 @@ from homeassistant.helpers.config_entry_oauth2_flow import (
     async_get_config_entry_implementation,
 )
 
-from .const import DOMAIN, OAUTH_SCOPES, PLATFORMS
+from .const import DOMAIN, EVENTSUB_MAX_CHANNELS, OAUTH_SCOPES, PLATFORMS
 from .coordinator import TwitchConfigEntry, TwitchCoordinator
 
 
@@ -29,7 +29,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: TwitchConfigEntry) -> bo
             LocalOAuth2Implementation,
             await async_get_config_entry_implementation(hass, entry),
         )
-    except ImplementationUnavailableError as err:
+    except (ImplementationUnavailableError, ValueError) as err:
         raise ConfigEntryNotReady(
             translation_domain=DOMAIN,
             translation_key="oauth2_implementation_unavailable",
@@ -72,9 +72,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: TwitchConfigEntry) -> bo
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    entry.async_create_background_task(
-        hass, coordinator.async_start_eventsub(), "twitch_eventsub_start"
-    )
+    if len(coordinator.users) <= EVENTSUB_MAX_CHANNELS:
+        entry.async_create_background_task(
+            hass, coordinator.async_start_eventsub(), "twitch_eventsub_start"
+        )
 
     return True
 

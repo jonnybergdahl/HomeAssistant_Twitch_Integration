@@ -24,9 +24,7 @@ from homeassistant.helpers.selector import (
     SelectSelectorConfig,
 )
 
-from .const import CONF_CHANNELS, DOMAIN, LOGGER, OAUTH_SCOPES
-
-CONF_ALL_CHANNELS = "all_channels"
+from .const import CONF_ALL_CHANNELS, CONF_CHANNELS, DOMAIN, LOGGER, OAUTH_SCOPES
 
 
 class OAuth2FlowHandler(
@@ -134,7 +132,10 @@ class OAuth2FlowHandler(
             return self.async_create_entry(
                 title=self._user_name,
                 data=self.data,
-                options={CONF_CHANNELS: self._followed_channels},
+                options={
+                    CONF_ALL_CHANNELS: True,
+                    CONF_CHANNELS: self._followed_channels,
+                },
             )
 
         return await self.async_step_select_channels()
@@ -150,7 +151,10 @@ class OAuth2FlowHandler(
                 return self.async_create_entry(
                     title=self._user_name,
                     data=self.data,
-                    options={CONF_CHANNELS: user_input[CONF_CHANNELS]},
+                    options={
+                        CONF_ALL_CHANNELS: False,
+                        CONF_CHANNELS: user_input[CONF_CHANNELS],
+                    },
                 )
             errors[CONF_CHANNELS] = "no_channels_selected"
 
@@ -192,7 +196,10 @@ class OAuth2FlowHandler(
             if user_input[CONF_CHANNELS]:
                 return self.async_update_reload_and_abort(
                     reconfigure_entry,
-                    options={CONF_CHANNELS: user_input[CONF_CHANNELS]},
+                    options={
+                        CONF_ALL_CHANNELS: False,
+                        CONF_CHANNELS: user_input[CONF_CHANNELS],
+                    },
                 )
             errors[CONF_CHANNELS] = "no_channels_selected"
 
