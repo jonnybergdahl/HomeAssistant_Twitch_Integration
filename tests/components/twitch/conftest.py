@@ -121,9 +121,17 @@ def twitch_mock(hass: HomeAssistant) -> Generator[AsyncMock]:
         mock_eventsub.return_value.stop = AsyncMock()
         mock_eventsub.return_value.listen_stream_online = AsyncMock(return_value="sub_id")
         mock_eventsub.return_value.listen_stream_offline = AsyncMock(return_value="sub_id")
+        mock_eventsub.return_value.listen_channel_follow_v2 = AsyncMock(return_value="sub_id")
+        mock_eventsub.return_value.listen_channel_subscribe = AsyncMock(return_value="sub_id")
+        mock_eventsub.return_value.listen_channel_subscription_end = AsyncMock(return_value="sub_id")
+        mock_eventsub.return_value.listen_channel_subscription_gift = AsyncMock(return_value="sub_id")
 
-        mock_client.return_value.get_users = lambda *args, **kwargs: get_generator(
-            hass, "get_users.json", TwitchUser
+        # get_users(logins=...) returns followed channels (get_users_2.json)
+        # get_users() with no logins returns the current user (get_users.json)
+        mock_client.return_value.get_users = lambda *args, **kwargs: (
+            get_generator(hass, "get_users_2.json", TwitchUser)
+            if kwargs.get("logins")
+            else get_generator(hass, "get_users.json", TwitchUser)
         )
         # Factory lambda ensures each call gets a fresh async generator
         mock_client.return_value.get_streams = lambda *args, **kwargs: get_generator(
@@ -136,6 +144,17 @@ def twitch_mock(hass: HomeAssistant) -> Generator[AsyncMock]:
             UserSubscription(
                 **load_json_object_fixture("check_user_subscription.json", DOMAIN)
             )
+        )
+        mock_followers = MagicMock()
+        mock_followers.total = 42
+        mock_client.return_value.get_channel_followers = AsyncMock(
+            return_value=mock_followers
+        )
+        mock_broadcaster_subs = MagicMock()
+        mock_broadcaster_subs.total = 10
+        mock_broadcaster_subs.points = 25
+        mock_client.return_value.get_broadcaster_subscriptions = AsyncMock(
+            return_value=mock_broadcaster_subs
         )
         mock_client.return_value.has_required_auth.return_value = True
         mock_client.return_value.get_channel_stream_schedule = AsyncMock(

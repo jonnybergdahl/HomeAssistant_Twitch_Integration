@@ -6,7 +6,7 @@ from typing import cast
 
 from aiohttp.client_exceptions import ClientError, ClientResponseError
 from twitchAPI.twitch import Twitch
-from twitchAPI.type import InvalidTokenException
+from twitchAPI.type import InvalidTokenException, MissingScopeException
 
 from homeassistant.const import CONF_ACCESS_TOKEN, CONF_TOKEN
 from homeassistant.core import HomeAssistant
@@ -66,7 +66,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: TwitchConfigEntry) -> bo
     client.auto_refresh_auth = False
     try:
         await client.set_user_authentication(access_token, scope=OAUTH_SCOPES)
-    except InvalidTokenException as err:
+    except (InvalidTokenException, MissingScopeException) as err:
         raise ConfigEntryAuthFailed("Invalid access token") from err
 
     coordinator = TwitchCoordinator(hass, client, session, entry)

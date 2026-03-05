@@ -12,7 +12,12 @@ from homeassistant.helpers.typing import StateType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import TwitchConfigEntry, TwitchCoordinator, TwitchUpdate
+from .coordinator import (
+    TwitchConfigEntry,
+    TwitchCoordinator,
+    TwitchOwnerUpdate,
+    TwitchUpdate,
+)
 
 ATTR_SUBSCRIPTION = "subscribed"
 ATTR_SUBSCRIPTION_GIFTED = "subscription_is_gifted"
@@ -20,6 +25,8 @@ ATTR_SUBSCRIPTION_TIER = "subscription_tier"
 ATTR_FOLLOW = "following"
 ATTR_FOLLOW_SINCE = "following_since"
 ATTR_FOLLOWING = "followers"
+ATTR_SUBSCRIBER_COUNT = "subscriber_count"
+ATTR_SUBSCRIBER_POINTS = "subscriber_points"
 STATE_OFFLINE = "offline"
 STATE_STREAMING = "streaming"
 
@@ -35,9 +42,11 @@ async def async_setup_entry(
     coordinator = entry.runtime_data
     known_ids: set[str] = set(coordinator.data)
 
-    async_add_entities(
-        TwitchSensor(coordinator, channel_id) for channel_id in coordinator.data
-    )
+    entities: list[SensorEntity] = [
+        TwitchOwnerSensor(coordinator),
+        *(TwitchSensor(coordinator, channel_id) for channel_id in coordinator.data),
+    ]
+    async_add_entities(entities)
 
     @callback
     def _async_add_new_channels(new_channel_ids: list[str]) -> None:
@@ -109,3 +118,48 @@ class TwitchSensor(CoordinatorEntity[TwitchCoordinator], SensorEntity):
     def entity_picture(self) -> str:
         """Return the channel profile picture."""
         return self.channel.picture
+
+
+class TwitchOwnerSensor(CoordinatorEntity[TwitchCoordinator], SensorEntity):
+    """Representation of the owner's Twitch channel."""
+
+    _attr_translation_key = "channel"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = [STATE_OFFLINE, STATE_STREAMING]
+    _attr_icon = "mdi:twitch"
+
+    def __init__(self, coordinator: TwitchCoordinator) -> None:
+        """Initialize the owner sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = coordinator.current_user.id
+        self._attr_name = coordinator.current_user.display_name
+
+    @property
+    def owner(self) -> TwitchOwnerUpdate | None:
+        """Return the owner update data."""
+        return self.coordinator.owner_data
+
+    @property
+    def native_value(self) -> StateType:
+        """Return the state of the sensor."""
+        owner = self.owner
+        if owner is None:
+            return STATE_OFFLINE
+        return STATE_STREAMING if owner.is_streaming else STATE_OFFLINE
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        owner = self.owner
+        if owner is None:
+            return {}
+        return {
+            ATTR_FOLLOWING: owner.followers,
+            ATTR_SUBSCRIBER_COUNT: owner.subscriber_count,
+            ATTR_SUBSCRIBER_POINTS: owner.subscriber_points,
+        }
+
+    @property
+    def entity_picture(self) -> str:
+        """Return the channel profile picture."""
+        return self.coordinator.current_user.profile_image_url
