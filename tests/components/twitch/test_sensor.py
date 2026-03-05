@@ -3,7 +3,6 @@
 from datetime import datetime
 from unittest.mock import AsyncMock
 
-from dateutil.tz import tzutc
 from twitchAPI.object.api import FollowedChannel, Stream, TwitchUser, UserSubscription
 from twitchAPI.type import TwitchAuthorizationException, TwitchResourceNotFound
 
@@ -30,7 +29,6 @@ async def test_offline(
     assert sensor_state.state == "offline"
     assert sensor_state.attributes["icon"] == "mdi:twitch"
     assert sensor_state.attributes["entity_picture"] == "logo.png"
-    assert sensor_state.attributes["channel_picture"] == "logo.png"
 
 
 async def test_streaming(
@@ -42,30 +40,7 @@ async def test_streaming(
     sensor_state = hass.states.get(ENTITY_ID)
     assert sensor_state.state == "streaming"
     assert sensor_state.attributes["icon"] == "mdi:twitch"
-    assert sensor_state.attributes["entity_picture"] == "stream-medium.png"
-    assert sensor_state.attributes["channel_picture"] == "logo.png"
-    assert sensor_state.attributes["game"] == "Good game"
-    assert sensor_state.attributes["title"] == "Title"
-    assert sensor_state.attributes["started_at"] == datetime(
-        year=2021, month=3, day=10, hour=3, minute=18, second=11, tzinfo=tzutc()
-    )
-    assert sensor_state.attributes["viewers"] == 42
-    assert sensor_state.attributes["stream_id"] == "stream-abc123"
-    assert sensor_state.attributes["language"] == "en"
-    assert sensor_state.attributes["is_mature"] is False
-
-
-async def test_offline_has_no_stream_id(
-    hass: HomeAssistant, twitch_mock: AsyncMock, config_entry: MockConfigEntry
-) -> None:
-    """Test that stream_id is None when channel is offline."""
-    twitch_mock.return_value.get_streams = lambda *args, **kwargs: get_generator_from_data(
-        [], Stream
-    )
-    await setup_integration(hass, config_entry)
-
-    sensor_state = hass.states.get(ENTITY_ID)
-    assert sensor_state.attributes["stream_id"] is None
+    assert sensor_state.attributes["entity_picture"] == "logo.png"
 
 
 async def test_oauth_without_sub_and_follow(
@@ -79,6 +54,10 @@ async def test_oauth_without_sub_and_follow(
         TwitchResourceNotFound
     )
     await setup_integration(hass, config_entry)
+
+    # Trigger second update to populate slow data (deferred on first refresh)
+    await config_entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
 
     sensor_state = hass.states.get(ENTITY_ID)
     assert sensor_state.attributes["subscribed"] is False
@@ -107,6 +86,10 @@ async def test_oauth_with_sub(
     )
     await setup_integration(hass, config_entry)
 
+    # Trigger second update to populate slow data (deferred on first refresh)
+    await config_entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
     sensor_state = hass.states.get("sensor.channel456")
     assert sensor_state.attributes["subscribed"] is True
     assert sensor_state.attributes["subscription_is_gifted"] is False
@@ -117,15 +100,19 @@ async def test_oauth_with_sub(
 async def test_auth_failed(
     hass: HomeAssistant, twitch_mock: AsyncMock, config_entry: MockConfigEntry
 ) -> None:
-    """Test that auth failure marks the entry as requiring reauth."""
-    from homeassistant.config_entries import ConfigEntryState
+    """Test that auth failure triggers reauth flow."""
+    twitch_mock.return_value.get_followed_channels.side_effect = (
+        TwitchAuthorizationException
+    )
+    await setup_integration(hass, config_entry)
 
-    twitch_mock.return_value.get_followed_channels.side_effect = TwitchAuthorizationException
-    config_entry.add_to_hass(hass)
-    await hass.config_entries.async_setup(config_entry.entry_id)
+    # First refresh defers slow data; trigger second update where auth fails
+    await config_entry.runtime_data.async_refresh()
     await hass.async_block_till_done()
 
-    assert config_entry.state is ConfigEntryState.SETUP_ERROR
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert len(flows) == 1
+    assert flows[0]["context"]["source"] == "reauth"
 
 
 async def test_oauth_with_follow(
@@ -133,6 +120,10 @@ async def test_oauth_with_follow(
 ) -> None:
     """Test state with oauth and follow."""
     await setup_integration(hass, config_entry)
+
+    # Trigger second update to populate slow data (deferred on first refresh)
+    await config_entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
 
     sensor_state = hass.states.get(ENTITY_ID)
     assert sensor_state.attributes["following"] is True

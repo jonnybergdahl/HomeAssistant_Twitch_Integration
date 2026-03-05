@@ -5,28 +5,21 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.typing import StateType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .const import DOMAIN
 from .coordinator import TwitchConfigEntry, TwitchCoordinator, TwitchUpdate
 
-ATTR_GAME = "game"
-ATTR_TITLE = "title"
 ATTR_SUBSCRIPTION = "subscribed"
 ATTR_SUBSCRIPTION_GIFTED = "subscription_is_gifted"
 ATTR_SUBSCRIPTION_TIER = "subscription_tier"
 ATTR_FOLLOW = "following"
 ATTR_FOLLOW_SINCE = "following_since"
 ATTR_FOLLOWING = "followers"
-ATTR_VIEWERS = "viewers"
-ATTR_STARTED_AT = "started_at"
-ATTR_CHANNEL_PICTURE = "channel_picture"
-ATTR_STREAM_ID = "stream_id"
-ATTR_LANGUAGE = "language"
-ATTR_IS_MATURE = "is_mature"
-
 STATE_OFFLINE = "offline"
 STATE_STREAMING = "streaming"
 
@@ -40,9 +33,27 @@ async def async_setup_entry(
 ) -> None:
     """Initialize entries."""
     coordinator = entry.runtime_data
+    known_ids: set[str] = set(coordinator.data)
 
     async_add_entities(
         TwitchSensor(coordinator, channel_id) for channel_id in coordinator.data
+    )
+
+    @callback
+    def _async_add_new_channels(new_channel_ids: list[str]) -> None:
+        new = [cid for cid in new_channel_ids if cid not in known_ids]
+        if new:
+            known_ids.update(new)
+            async_add_entities(
+                TwitchSensor(coordinator, cid) for cid in new
+            )
+
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass,
+            f"{DOMAIN}_new_channels_{entry.entry_id}",
+            _async_add_new_channels,
+        )
     )
 
 
@@ -81,31 +92,20 @@ class TwitchSensor(CoordinatorEntity[TwitchCoordinator], SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes."""
         channel = self.channel
-        resp = {
+        resp: dict[str, Any] = {
             ATTR_FOLLOWING: channel.followers,
-            ATTR_GAME: channel.game,
-            ATTR_TITLE: channel.title,
-            ATTR_STARTED_AT: channel.started_at,
-            ATTR_VIEWERS: channel.viewers,
-            ATTR_STREAM_ID: channel.stream_id,
-            ATTR_LANGUAGE: channel.language,
-            ATTR_IS_MATURE: channel.is_mature,
-            ATTR_SUBSCRIPTION: False,
-            ATTR_CHANNEL_PICTURE: channel.picture,
         }
         if channel.subscribed is not None:
             resp[ATTR_SUBSCRIPTION] = channel.subscribed
-            resp[ATTR_SUBSCRIPTION_GIFTED] = channel.subscription_gifted
-            resp[ATTR_SUBSCRIPTION_TIER] = channel.subscription_tier
+            if channel.subscribed:
+                resp[ATTR_SUBSCRIPTION_GIFTED] = channel.subscription_gifted
+                resp[ATTR_SUBSCRIPTION_TIER] = channel.subscription_tier
         resp[ATTR_FOLLOW] = channel.follows
         if channel.follows:
             resp[ATTR_FOLLOW_SINCE] = channel.following_since
         return resp
 
     @property
-    def entity_picture(self) -> str | None:
-        """Return the picture of the sensor."""
-        if self.channel.is_streaming:
-            assert self.channel.stream_picture is not None
-            return self.channel.stream_picture
+    def entity_picture(self) -> str:
+        """Return the channel profile picture."""
         return self.channel.picture

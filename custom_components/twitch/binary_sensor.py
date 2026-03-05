@@ -8,10 +8,12 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .const import DOMAIN
 from .coordinator import TwitchConfigEntry, TwitchCoordinator, TwitchUpdate
 
 PARALLEL_UPDATES = 0
@@ -24,9 +26,27 @@ async def async_setup_entry(
 ) -> None:
     """Initialize binary sensor entries."""
     coordinator = entry.runtime_data
+    known_ids: set[str] = set(coordinator.data)
 
     async_add_entities(
         TwitchLiveSensor(coordinator, channel_id) for channel_id in coordinator.data
+    )
+
+    @callback
+    def _async_add_new_channels(new_channel_ids: list[str]) -> None:
+        new = [cid for cid in new_channel_ids if cid not in known_ids]
+        if new:
+            known_ids.update(new)
+            async_add_entities(
+                TwitchLiveSensor(coordinator, cid) for cid in new
+            )
+
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass,
+            f"{DOMAIN}_new_channels_{entry.entry_id}",
+            _async_add_new_channels,
+        )
     )
 
 
@@ -55,7 +75,7 @@ class TwitchLiveSensor(CoordinatorEntity[TwitchCoordinator], BinarySensorEntity)
     @property
     def icon(self) -> str:
         """Return the icon based on live status."""
-        return "mdi:twitch" if self.channel.is_streaming else "mdi:video-off-outline"
+        return "mdi:video-outline" if self.channel.is_streaming else "mdi:video-off-outline"
 
     @property
     def is_on(self) -> bool:
@@ -63,9 +83,24 @@ class TwitchLiveSensor(CoordinatorEntity[TwitchCoordinator], BinarySensorEntity)
         return self.channel.is_streaming
 
     @property
+    def entity_picture(self) -> str:
+        """Return the stream thumbnail when live, channel picture otherwise."""
+        if self.channel.is_streaming and self.channel.stream_picture:
+            return self.channel.stream_picture
+        return self.channel.picture
+
+    @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes."""
+        channel = self.channel
+        if not channel.is_streaming:
+            return {}
         return {
-            "game": self.channel.game,
-            "title": self.channel.title,
+            "game": channel.game,
+            "title": channel.title,
+            "started_at": channel.started_at,
+            "viewers": channel.viewers,
+            "stream_id": channel.stream_id,
+            "language": channel.language,
+            "is_mature": channel.is_mature,
         }

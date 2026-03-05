@@ -6,6 +6,7 @@ import pytest
 from twitchAPI.object.api import TwitchUser
 
 from homeassistant.components.twitch.const import (
+    CONF_ALL_CHANNELS,
     CONF_CHANNELS,
     DOMAIN,
     OAUTH2_AUTHORIZE,
@@ -78,7 +79,7 @@ async def test_full_flow(
     assert result["result"].data["token"]["access_token"] == "mock-access-token"
     assert result["result"].data["token"]["refresh_token"] == "mock-refresh-token"
     assert result["result"].unique_id == "123"
-    assert result["options"] == {CONF_CHANNELS: ["internetofthings", "homeassistant"]}
+    assert result["options"] == {CONF_ALL_CHANNELS: True, CONF_CHANNELS: ["internetofthings", "homeassistant"]}
 
 
 @pytest.mark.usefixtures("current_request_with_host")
@@ -109,7 +110,7 @@ async def test_full_flow_select_specific_channels(
     )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["options"] == {CONF_CHANNELS: ["internetofthings"]}
+    assert result["options"] == {CONF_ALL_CHANNELS: False, CONF_CHANNELS: ["internetofthings"]}
 
 
 @pytest.mark.usefixtures("current_request_with_host")
@@ -142,7 +143,7 @@ async def test_select_channels_defaults_to_own_channel(
         result["flow_id"], user_input={CONF_CHANNELS: default}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["options"] == {CONF_CHANNELS: ["channel123"]}
+    assert result["options"] == {CONF_ALL_CHANNELS: False, CONF_CHANNELS: ["channel123"]}
 
 
 @pytest.mark.usefixtures("current_request_with_host")
@@ -178,7 +179,7 @@ async def test_select_channels_no_selection_error(
         result["flow_id"], user_input={CONF_CHANNELS: ["homeassistant"]}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["options"] == {CONF_CHANNELS: ["homeassistant"]}
+    assert result["options"] == {CONF_ALL_CHANNELS: False, CONF_CHANNELS: ["homeassistant"]}
 
 
 @pytest.mark.usefixtures("current_request_with_host")
@@ -317,7 +318,8 @@ async def test_reconfigure(
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
     assert config_entry.options == {
-        CONF_CHANNELS: ["internetofthings", "homeassistant"]
+        CONF_ALL_CHANNELS: False,
+        CONF_CHANNELS: ["internetofthings", "homeassistant"],
     }
 
 
@@ -340,7 +342,7 @@ async def test_reconfigure_includes_own_channel(
     )
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
-    assert config_entry.options == {CONF_CHANNELS: ["channel123"]}
+    assert config_entry.options == {CONF_ALL_CHANNELS: False, CONF_CHANNELS: ["channel123"]}
 
 
 @pytest.mark.usefixtures("current_request_with_host")
@@ -371,4 +373,4 @@ async def test_reconfigure_no_channels_error(
     )
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
-    assert config_entry.options == {CONF_CHANNELS: ["homeassistant"]}
+    assert config_entry.options == {CONF_ALL_CHANNELS: False, CONF_CHANNELS: ["homeassistant"]}
