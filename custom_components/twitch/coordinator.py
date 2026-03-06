@@ -151,16 +151,38 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
 
     async def _async_setup(self) -> None:
         """Set up the coordinator, fetching users and initial stream data."""
-        channels = self.config_entry.options[CONF_CHANNELS]
+        channels = list(self.config_entry.options[CONF_CHANNELS])
         LOGGER.debug("Setting up coordinator for %d channel(s): %s", len(channels), channels)
+
+        if not (user := await first(self.twitch.get_users())):
+            raise UpdateFailed("Logged in user not found")
+        self.current_user = user
+
+        # When tracking all channels, discover new follows at startup.
+        # Only update in memory here; the config entry is persisted in
+        # _async_update_slow to avoid triggering a reload during setup.
+        if self.config_entry.options.get(CONF_ALL_CHANNELS, False):
+            tracked = set(channels)
+            new_logins = [
+                f.broadcaster_login
+                async for f in await self.twitch.get_followed_channels(
+                    user_id=self.current_user.id, first=100
+                )
+                if f.broadcaster_login not in tracked
+            ]
+            if new_logins:
+                LOGGER.debug(
+                    "Discovered %d new followed channel(s) at startup: %s",
+                    len(new_logins),
+                    new_logins,
+                )
+                channels.extend(new_logins)
+
         self.users = []
         for chunk in chunk_list(channels, 100):
             self.users.extend(
                 [channel async for channel in self.twitch.get_users(logins=chunk)]
             )
-        if not (user := await first(self.twitch.get_users())):
-            raise UpdateFailed("Logged in user not found")
-        self.current_user = user
         # Remove owner from followed list if present (they're tracked separately)
         self.users = [u for u in self.users if u.id != self.current_user.id]
         LOGGER.debug(
@@ -175,8 +197,10 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
             async for stream in self.twitch.get_streams(user_id=chunk):
                 self._stream_data[stream.user_id] = stream
 
-    async def async_start_eventsub(self) -> None:
-        """Start EventSub WebSocket for real-time stream status updates."""
+    async def _async_ensure_eventsub(self) -> None:
+        """Ensure the EventSub WebSocket is started."""
+        if self._eventsub is not None:
+            return
         # start() is sync with a busy-wait loop so run it in the executor.
         # Don't pass callback_loop; the library's create_task call is not
         # thread-safe. Instead, callbacks run on the socket's own loop and
@@ -184,22 +208,22 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
         self._eventsub = EventSubWebsocket(self.twitch)
         await self.hass.async_add_executor_job(self._eventsub.start)
 
-        all_channels = [*self.users, self.current_user]
+    async def async_start_owner_eventsub(self) -> None:
+        """Start EventSub subscriptions for the owner's channel.
+
+        Always called regardless of the number of followed channels.
+        Subscribes to stream online/offline, follower, and subscriber events.
+        """
+        await self._async_ensure_eventsub()
+        assert self._eventsub is not None
         try:
             await asyncio.gather(
-                *(
-                    coro
-                    for user in all_channels
-                    for coro in (
-                        self._eventsub.listen_stream_online(
-                            user.id, self._async_on_stream_online
-                        ),
-                        self._eventsub.listen_stream_offline(
-                            user.id, self._async_on_stream_offline
-                        ),
-                    )
+                self._eventsub.listen_stream_online(
+                    self.current_user.id, self._async_on_stream_online
                 ),
-                # Owner-only subscriptions
+                self._eventsub.listen_stream_offline(
+                    self.current_user.id, self._async_on_stream_offline
+                ),
                 self._eventsub.listen_channel_follow_v2(
                     self.current_user.id,
                     self.current_user.id,
@@ -220,14 +244,45 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
             )
         except EventSubSubscriptionError:
             LOGGER.warning(
-                "EventSub subscription limit exceeded; falling back to polling"
+                "EventSub subscription failed for owner; falling back to polling"
             )
             await self._eventsub.stop()
             self._eventsub = None
             return
 
+        LOGGER.debug("EventSub WebSocket started for owner")
+
+    async def async_start_channel_eventsub(self) -> None:
+        """Start EventSub subscriptions for followed channels' stream status.
+
+        Only called when the number of followed channels is within limits.
+        """
+        await self._async_ensure_eventsub()
+        assert self._eventsub is not None
+        try:
+            await asyncio.gather(
+                *(
+                    coro
+                    for user in self.users
+                    for coro in (
+                        self._eventsub.listen_stream_online(
+                            user.id, self._async_on_stream_online
+                        ),
+                        self._eventsub.listen_stream_offline(
+                            user.id, self._async_on_stream_offline
+                        ),
+                    )
+                ),
+            )
+        except EventSubSubscriptionError:
+            LOGGER.warning(
+                "EventSub subscription limit exceeded for followed channels; "
+                "falling back to polling"
+            )
+            return
+
         LOGGER.debug(
-            "EventSub WebSocket started for %d channel(s) + owner",
+            "EventSub WebSocket started for %d followed channel(s)",
             len(self.users),
         )
 
@@ -409,16 +464,21 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
                 for chunk in chunk_list(new_ids, 100):
                     async for stream in self.twitch.get_streams(user_id=chunk):
                         self._stream_data[stream.user_id] = stream
-                # Update stored channel list
-                all_logins = [u.login for u in self.users]
-                self.hass.config_entries.async_update_entry(
-                    self.config_entry,
-                    options={**self.config_entry.options, CONF_CHANNELS: all_logins},
-                )
                 async_dispatcher_send(
                     self.hass,
                     f"{DOMAIN}_new_channels_{self.config_entry.entry_id}",
                     [u.id for u in new_users],
+                )
+
+            # Always sync the stored channel list (covers channels discovered
+            # at startup in _async_setup that weren't persisted yet).
+            all_logins = [u.login for u in self.users]
+            if set(all_logins) != set(
+                self.config_entry.options.get(CONF_CHANNELS, [])
+            ):
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    options={**self.config_entry.options, CONF_CHANNELS: all_logins},
                 )
 
         # Fetch owner data: follower count + broadcaster subscriptions

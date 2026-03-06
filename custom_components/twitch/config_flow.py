@@ -39,7 +39,6 @@ class OAuth2FlowHandler(
         super().__init__()
         self.data: dict[str, Any] = {}
         self._user_name: str = ""
-        self._current_user_login: str = ""
         self._followed_channels: list[str] = []
 
     @property
@@ -81,7 +80,6 @@ class OAuth2FlowHandler(
 
             self.data = data
             self._user_name = user.display_name
-            self._current_user_login = user.login or ""
             self._followed_channels = [
                 channel.broadcaster_login
                 async for channel in await client.get_followed_channels(user_id)
@@ -158,26 +156,15 @@ class OAuth2FlowHandler(
                 )
             errors[CONF_CHANNELS] = "no_channels_selected"
 
-        # Include the authenticated user's own channel in the options even if
-        # they don't follow themselves; the coordinator always monitors it.
-        channel_options = list(self._followed_channels)
-        if (
-            self._current_user_login
-            and self._current_user_login not in channel_options
-        ):
-            channel_options.insert(0, self._current_user_login)
-
-        options = [SelectOptionDict(value=ch, label=ch) for ch in channel_options]
-        default_channels = (
-            [self._current_user_login] if self._current_user_login else []
-        )
+        options = [
+            SelectOptionDict(value=ch, label=ch)
+            for ch in self._followed_channels
+        ]
         return self.async_show_form(
             step_id="select_channels",
             data_schema=vol.Schema(
                 {
-                    vol.Required(
-                        CONF_CHANNELS, default=default_channels
-                    ): SelectSelector(
+                    vol.Required(CONF_CHANNELS): SelectSelector(
                         SelectSelectorConfig(options=options, multiple=True)
                     ),
                 }
@@ -188,7 +175,41 @@ class OAuth2FlowHandler(
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Handle reconfiguration to update the channel selection."""
+        """Handle reconfiguration: ask whether to track all or specific channels."""
+        reconfigure_entry = self._get_reconfigure_entry()
+        current_all = reconfigure_entry.options.get(CONF_ALL_CHANNELS, False)
+
+        if user_input is not None:
+            if user_input[CONF_ALL_CHANNELS]:
+                # Just set the flag; the coordinator discovers followed
+                # channels at startup, so no API calls needed here.
+                return self.async_update_reload_and_abort(
+                    reconfigure_entry,
+                    options={
+                        CONF_ALL_CHANNELS: True,
+                        CONF_CHANNELS: list(
+                            reconfigure_entry.options.get(CONF_CHANNELS, [])
+                        ),
+                    },
+                )
+
+            return await self.async_step_reconfigure_channels()
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_ALL_CHANNELS, default=current_all
+                    ): BooleanSelector(),
+                }
+            ),
+        )
+
+    async def async_step_reconfigure_channels(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle specific channel selection during reconfiguration."""
         reconfigure_entry = self._get_reconfigure_entry()
         errors: dict[str, str] = {}
 
@@ -221,16 +242,12 @@ class OAuth2FlowHandler(
             async for channel in await client.get_followed_channels(user.id)
         ]
 
-        channel_options = list(followed_channels)
-        if user.login and user.login not in channel_options:
-            channel_options.insert(0, user.login)
-
         current_channels = reconfigure_entry.options.get(CONF_CHANNELS, [])
         options = [
-            SelectOptionDict(value=ch, label=ch) for ch in channel_options
+            SelectOptionDict(value=ch, label=ch) for ch in followed_channels
         ]
         return self.async_show_form(
-            step_id="reconfigure",
+            step_id="reconfigure_channels",
             data_schema=vol.Schema(
                 {
                     vol.Required(

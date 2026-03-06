@@ -43,7 +43,17 @@
       },
       "reconfigure": {
         "title": "Update tracked channels",
-        "description": "Update the list of Twitch channels you want to monitor. Your currently tracked channels are pre-selected.",
+        "description": "Choose whether to monitor all Twitch channels you follow or select specific ones.",
+        "data": {
+          "all_channels": "Add all followed channels"
+        },
+        "data_description": {
+          "all_channels": "When enabled, all channels you follow on Twitch will be monitored."
+        }
+      },
+      "reconfigure_channels": {
+        "title": "Select channels",
+        "description": "Select the channels you want to monitor. Your currently tracked channels are pre-selected.",
         "data": {
           "channels": "Channels"
         }

@@ -4,6 +4,21 @@ This is a beta version of the enhanced Twitch integration for Home Assistant, di
 
 > **Note:** This custom integration will override the built-in Twitch integration. Remove it from HACS when the changes are merged into Home Assistant core.
 
+## Changes
+
+Changes compared to the original Twitch integration.
+
+ - New: Backend changes to use the Twitch EventSub push service for real-time updates.
+ - New: Owner sensor is moved to it's own type, with fast EventSub updates for follower and subscriber updates
+ - New: Dedicated binary sensors for followed Twitch channels stream status.
+ - New: Channel selection in config flow
+ - New: Adds the Calender platform
+ - Change: GUI OAuth repair
+ - Change: Faster integration load, attributes are now fetched after Home Assistant is started
+
+Note: Due to Twitch EventSub limits, it is only used for followed channels if they are 12 or less. 
+The integration automatically switches to one minute polling for followed channels if that limit is exceeded.
+
 ## Installation
 
 ### HACS (recommended)

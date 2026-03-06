@@ -76,10 +76,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: TwitchConfigEntry) -> bo
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    if len(coordinator.users) <= EVENTSUB_MAX_CHANNELS:
-        entry.async_create_background_task(
-            hass, coordinator.async_start_eventsub(), "twitch_eventsub_start"
-        )
+    # Owner EventSub is always started for real-time follower/subscriber updates.
+    # Followed channel EventSub is only started when within subscription limits.
+    async def _start_eventsub() -> None:
+        await coordinator.async_start_owner_eventsub()
+        if len(coordinator.users) <= EVENTSUB_MAX_CHANNELS:
+            await coordinator.async_start_channel_eventsub()
+
+    entry.async_create_background_task(
+        hass, _start_eventsub(), "twitch_eventsub_start"
+    )
 
     return True
 
