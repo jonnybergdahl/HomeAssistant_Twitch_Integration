@@ -14,7 +14,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import TwitchConfigEntry, TwitchCoordinator, TwitchUpdate
+from .coordinator import TwitchConfigEntry, TwitchCoordinator, TwitchOwnerUpdate, TwitchUpdate
 
 PARALLEL_UPDATES = 0
 
@@ -28,9 +28,11 @@ async def async_setup_entry(
     coordinator = entry.runtime_data
     known_ids: set[str] = set(coordinator.data)
 
-    async_add_entities(
-        TwitchLiveSensor(coordinator, channel_id) for channel_id in coordinator.data
-    )
+    entities: list[BinarySensorEntity] = [
+        TwitchOwnerLiveSensor(coordinator),
+        *(TwitchLiveSensor(coordinator, channel_id) for channel_id in coordinator.data),
+    ]
+    async_add_entities(entities)
 
     @callback
     def _async_add_new_channels(new_channel_ids: list[str]) -> None:
@@ -103,4 +105,59 @@ class TwitchLiveSensor(CoordinatorEntity[TwitchCoordinator], BinarySensorEntity)
             "stream_id": channel.stream_id,
             "language": channel.language,
             "is_mature": channel.is_mature,
+        }
+
+
+class TwitchOwnerLiveSensor(CoordinatorEntity[TwitchCoordinator], BinarySensorEntity):
+    """Binary sensor representing whether the owner's Twitch channel is live."""
+
+    _attr_device_class = BinarySensorDeviceClass.RUNNING
+
+    def __init__(self, coordinator: TwitchCoordinator) -> None:
+        """Initialize the binary sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.current_user.id}_live"
+        self._attr_name = f"{coordinator.current_user.display_name} live"
+
+    @property
+    def owner(self) -> TwitchOwnerUpdate | None:
+        """Return the owner update data."""
+        return self.coordinator.owner_data
+
+    @property
+    def icon(self) -> str:
+        """Return the icon based on live status."""
+        owner = self.owner
+        if owner is not None and owner.is_streaming:
+            return "mdi:video-outline"
+        return "mdi:video-off-outline"
+
+    @property
+    def is_on(self) -> bool:
+        """Return true when the channel is live."""
+        owner = self.owner
+        return owner is not None and owner.is_streaming
+
+    @property
+    def entity_picture(self) -> str:
+        """Return the stream thumbnail when live, channel picture otherwise."""
+        owner = self.owner
+        if owner is not None and owner.is_streaming and owner.stream_picture:
+            return owner.stream_picture
+        return self.coordinator.current_user.profile_image_url
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        owner = self.owner
+        if owner is None or not owner.is_streaming:
+            return {}
+        return {
+            "game": owner.game,
+            "title": owner.title,
+            "started_at": owner.started_at,
+            "viewers": owner.viewers,
+            "stream_id": owner.stream_id,
+            "language": owner.language,
+            "is_mature": owner.is_mature,
         }

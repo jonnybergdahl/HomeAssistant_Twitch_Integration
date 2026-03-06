@@ -114,39 +114,6 @@ async def test_full_flow_select_specific_channels(
 
 
 @pytest.mark.usefixtures("current_request_with_host")
-async def test_select_channels_defaults_to_own_channel(
-    hass: HomeAssistant,
-    hass_client_no_auth: ClientSessionGenerator,
-    mock_setup_entry,
-    twitch_mock: AsyncMock,
-    scopes: list[str],
-) -> None:
-    """Check that the select step pre-selects the user's own channel."""
-    result = await hass.config_entries.flow.async_init(
-        "twitch", context={"source": SOURCE_USER}
-    )
-    await _do_get_token(hass, result, hass_client_no_auth, scopes)
-
-    result = await hass.config_entries.flow.async_configure(result["flow_id"])
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], user_input={"all_channels": False}
-    )
-    assert result["step_id"] == "select_channels"
-
-    # The schema default should be the user's own login ("channel123")
-    schema_keys = {str(k): k for k in result["data_schema"].schema}
-    default = schema_keys[CONF_CHANNELS].default()
-    assert default == ["channel123"]
-
-    # Accepting the default creates an entry with only the user's own channel
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], user_input={CONF_CHANNELS: default}
-    )
-    assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["options"] == {CONF_ALL_CHANNELS: False, CONF_CHANNELS: ["channel123"]}
-
-
-@pytest.mark.usefixtures("current_request_with_host")
 async def test_select_channels_no_selection_error(
     hass: HomeAssistant,
     hass_client_no_auth: ClientSessionGenerator,
@@ -298,17 +265,25 @@ async def test_reauth_wrong_account(
 
 
 @pytest.mark.usefixtures("current_request_with_host")
-async def test_reconfigure(
+async def test_reconfigure_select_specific(
     hass: HomeAssistant,
     config_entry: MockConfigEntry,
     twitch_mock: AsyncMock,
 ) -> None:
-    """Check reconfigure flow updates the channel selection."""
+    """Check reconfigure flow allows switching to specific channels."""
     await setup_integration(hass, config_entry)
 
     result = await config_entry.start_reconfigure_flow(hass)
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "reconfigure"
+
+    # Choose specific channels
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        user_input={CONF_ALL_CHANNELS: False},
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reconfigure_channels"
 
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
@@ -324,25 +299,29 @@ async def test_reconfigure(
 
 
 @pytest.mark.usefixtures("current_request_with_host")
-async def test_reconfigure_includes_own_channel(
+async def test_reconfigure_all_channels(
     hass: HomeAssistant,
     config_entry: MockConfigEntry,
     twitch_mock: AsyncMock,
 ) -> None:
-    """Check reconfigure includes the user's own channel even if not followed."""
+    """Check reconfigure flow allows switching to all channels."""
     await setup_integration(hass, config_entry)
 
     result = await config_entry.start_reconfigure_flow(hass)
     assert result["step_id"] == "reconfigure"
 
-    # Selecting only the user's own channel (not in followed list) should succeed
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
-        user_input={CONF_CHANNELS: ["channel123"]},
+        user_input={CONF_ALL_CHANNELS: True},
     )
+
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
-    assert config_entry.options == {CONF_ALL_CHANNELS: False, CONF_CHANNELS: ["channel123"]}
+    # Existing channels are preserved; the coordinator discovers new ones at startup
+    assert config_entry.options == {
+        CONF_ALL_CHANNELS: True,
+        CONF_CHANNELS: ["internetofthings"],
+    }
 
 
 @pytest.mark.usefixtures("current_request_with_host")
@@ -357,13 +336,20 @@ async def test_reconfigure_no_channels_error(
     result = await config_entry.start_reconfigure_flow(hass)
     assert result["step_id"] == "reconfigure"
 
+    # Choose specific channels
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        user_input={CONF_ALL_CHANNELS: False},
+    )
+    assert result["step_id"] == "reconfigure_channels"
+
     # Submit with no channels
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         user_input={CONF_CHANNELS: []},
     )
     assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "reconfigure"
+    assert result["step_id"] == "reconfigure_channels"
     assert result["errors"] == {CONF_CHANNELS: "no_channels_selected"}
 
     # Correct the selection
