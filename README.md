@@ -4,6 +4,10 @@ This is a beta version of the enhanced Twitch integration for Home Assistant, di
 
 > **Note:** This custom integration will override the built-in Twitch integration. Remove it from HACS when the changes are merged into Home Assistant core.
 
+## Feedback
+
+I have a [Discord channel](https://discord.gg/avNGRwZj) if you want to discuss features. 
+
 ## Changes
 
 Changes compared to the original Twitch integration.
