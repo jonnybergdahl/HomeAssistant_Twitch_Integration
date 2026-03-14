@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import logging
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import voluptuous as vol
 from twitchAPI.helper import first
@@ -25,6 +25,9 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import CONF_ALL_CHANNELS, CONF_CHANNELS, DOMAIN, LOGGER, OAUTH_SCOPES
+
+if TYPE_CHECKING:
+    from . import async_cleanup_removed_channels
 
 
 class OAuth2FlowHandler(
@@ -176,6 +179,8 @@ class OAuth2FlowHandler(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle reconfiguration: ask whether to track all or specific channels."""
+        from . import async_cleanup_removed_channels
+
         reconfigure_entry = self._get_reconfigure_entry()
         current_all = reconfigure_entry.options.get(CONF_ALL_CHANNELS, False)
 
@@ -183,6 +188,8 @@ class OAuth2FlowHandler(
             if user_input[CONF_ALL_CHANNELS]:
                 # Just set the flag; the coordinator discovers followed
                 # channels at startup, so no API calls needed here.
+                # When switching to "all channels", we don't remove any entities
+                # since the user may be following them again.
                 return self.async_update_reload_and_abort(
                     reconfigure_entry,
                     options={
@@ -210,11 +217,17 @@ class OAuth2FlowHandler(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle specific channel selection during reconfiguration."""
+        from . import async_cleanup_removed_channels
+
         reconfigure_entry = self._get_reconfigure_entry()
         errors: dict[str, str] = {}
 
         if user_input is not None:
             if user_input[CONF_CHANNELS]:
+                # Clean up entities for removed channels before reloading
+                await async_cleanup_removed_channels(
+                    self.hass, reconfigure_entry, user_input[CONF_CHANNELS]
+                )
                 return self.async_update_reload_and_abort(
                     reconfigure_entry,
                     options={

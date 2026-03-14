@@ -11,7 +11,7 @@ from twitchAPI.type import InvalidTokenException, MissingScopeException
 from homeassistant.const import CONF_ACCESS_TOKEN, CONF_TOKEN
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
-from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.helpers.config_entry_oauth2_flow import (
     ImplementationUnavailableError,
     LocalOAuth2Implementation,
@@ -19,8 +19,55 @@ from homeassistant.helpers.config_entry_oauth2_flow import (
     async_get_config_entry_implementation,
 )
 
-from .const import DOMAIN, EVENTSUB_MAX_CHANNELS, OAUTH_SCOPES, PLATFORMS
+from .const import CONF_CHANNELS, DOMAIN, EVENTSUB_MAX_CHANNELS, OAUTH_SCOPES, PLATFORMS
 from .coordinator import TwitchConfigEntry, TwitchCoordinator
+
+
+async def async_cleanup_removed_channels(
+    hass: HomeAssistant, entry: TwitchConfigEntry, new_channel_logins: list[str]
+) -> None:
+    """Remove entities for channels that are no longer being tracked."""
+    entity_registry = er.async_get(hass)
+
+    # Get current tracked channel logins from options before reload
+    old_channels = set(entry.options.get(CONF_CHANNELS, []))
+    new_channels = set(new_channel_logins)
+
+    # Find removed channels
+    removed_channels = old_channels - new_channels
+
+    if not removed_channels:
+        return
+
+    # We need to map logins to channel IDs. If the coordinator is running,
+    # we can get the IDs from there.
+    if entry.runtime_data:
+        coordinator = entry.runtime_data
+        # Build login -> id mapping
+        login_to_id = {user.login: user.id for user in coordinator.users}
+
+        # Get all entities for this config entry
+        entities = er.async_entries_for_config_entry(entity_registry, entry.entry_id)
+
+        # Remove entities for removed channels
+        for channel_login in removed_channels:
+            channel_id = login_to_id.get(channel_login)
+            if not channel_id:
+                continue
+
+            for entity in entities:
+                # Extract channel_id from unique_id
+                # Format: "{channel_id}" for sensors, "{channel_id}_live" for binary sensors
+                unique_id = entity.unique_id
+                # Skip calendar and owner entities
+                if unique_id.endswith("_calendar"):
+                    continue
+                if unique_id == coordinator.current_user.id or unique_id == f"{coordinator.current_user.id}_live":
+                    continue
+
+                # Check if this entity belongs to the removed channel
+                if unique_id == channel_id or unique_id == f"{channel_id}_live":
+                    entity_registry.async_remove(entity.entity_id)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: TwitchConfigEntry) -> bool:
