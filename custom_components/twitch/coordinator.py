@@ -142,7 +142,7 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
         self._slow_update_deferred = False
         self._stream_data: dict[str, Stream] = {}
         self._eventsub_owner: EventSubWebsocket | None = None
-        self._eventsub_channels: EventSubWebsocket | None = None
+        self._eventsub_channels: list[EventSubWebsocket] = []
         self._owner_update: TwitchOwnerUpdate | None = None
 
     @property
@@ -209,12 +209,17 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
         self._eventsub_owner = EventSubWebsocket(self.twitch)
         await self.hass.async_add_executor_job(self._eventsub_owner.start)
 
-    async def _async_ensure_channels_eventsub(self) -> None:
-        """Ensure the channels EventSub WebSocket is started."""
-        if self._eventsub_channels is not None:
-            return
-        self._eventsub_channels = EventSubWebsocket(self.twitch)
-        await self.hass.async_add_executor_job(self._eventsub_channels.start)
+    async def _async_ensure_channels_eventsub(self, count: int) -> None:
+        """Ensure the required number of channel EventSub WebSockets are started.
+
+        Args:
+            count: Number of WebSocket connections needed (max 2).
+        """
+        count = min(count, 2)  # Maximum 2 connections for channels (3 total with owner)
+        while len(self._eventsub_channels) < count:
+            websocket = EventSubWebsocket(self.twitch)
+            await self.hass.async_add_executor_job(websocket.start)
+            self._eventsub_channels.append(websocket)
 
     async def async_start_owner_eventsub(self) -> bool:
         """Start EventSub subscriptions for the owner's channel.
@@ -272,28 +277,36 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
         """Start EventSub subscriptions for followed channels' stream status.
 
         Only called when the number of followed channels is within limits.
+        Distributes channels across up to 2 WebSocket connections, with each
+        connection supporting up to 5 channels (10 points / 2 points per channel).
 
         Returns:
             True if EventSub was successfully started, False if it failed and
             polling fallback should be used.
         """
-        await self._async_ensure_channels_eventsub()
-        assert self._eventsub_channels is not None
+        # Calculate how many connections we need (5 channels per connection max, 2 connections max)
+        num_channels = len(self.users)
+        num_connections = min(2, (num_channels + 4) // 5)  # Ceiling division, max 2
+
+        await self._async_ensure_channels_eventsub(num_connections)
+        assert len(self._eventsub_channels) > 0
+
         try:
-            await asyncio.gather(
-                *(
-                    coro
-                    for user in self.users
-                    for coro in (
-                        self._eventsub_channels.listen_stream_online(
-                            user.id, self._async_on_stream_online
-                        ),
-                        self._eventsub_channels.listen_stream_offline(
-                            user.id, self._async_on_stream_offline
-                        ),
-                    )
-                ),
-            )
+            # Distribute channels across connections
+            tasks = []
+            for idx, user in enumerate(self.users):
+                # Round-robin distribution across available connections
+                connection = self._eventsub_channels[idx % len(self._eventsub_channels)]
+                tasks.extend([
+                    connection.listen_stream_online(
+                        user.id, self._async_on_stream_online
+                    ),
+                    connection.listen_stream_offline(
+                        user.id, self._async_on_stream_offline
+                    ),
+                ])
+
+            await asyncio.gather(*tasks)
         except EventSubSubscriptionError as err:
             LOGGER.warning(
                 "EventSub subscription limit exceeded for followed channels; "
@@ -301,14 +314,16 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
                 "on multiple servers or another application is using EventSub subscriptions"
             )
             LOGGER.debug("EventSub error details: %s", err)
-            # Stop the EventSub connection since we can't use it
-            await self._eventsub_channels.stop()
-            self._eventsub_channels = None
+            # Stop all channel EventSub connections
+            for websocket in self._eventsub_channels:
+                await websocket.stop()
+            self._eventsub_channels = []
             return False
 
         LOGGER.debug(
-            "EventSub WebSocket started for %d followed channel(s)",
+            "EventSub WebSocket started for %d followed channel(s) across %d connection(s)",
             len(self.users),
+            len(self._eventsub_channels),
         )
         return True
 
@@ -317,9 +332,9 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
         if self._eventsub_owner is not None:
             await self._eventsub_owner.stop()
             self._eventsub_owner = None
-        if self._eventsub_channels is not None:
-            await self._eventsub_channels.stop()
-            self._eventsub_channels = None
+        for websocket in self._eventsub_channels:
+            await websocket.stop()
+        self._eventsub_channels = []
 
     async def _async_on_stream_online(self, event: StreamOnlineEvent) -> None:
         """Handle stream.online event from EventSub (runs on socket thread)."""
