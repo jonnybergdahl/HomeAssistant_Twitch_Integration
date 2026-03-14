@@ -307,7 +307,6 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
             )
 
             # Distribute channels across connections
-            tasks = []
             for idx, user in enumerate(self.users):
                 # Round-robin distribution across available connections
                 connection_idx = idx % len(self._eventsub_channels)
@@ -318,16 +317,20 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
                     user.id,
                     connection_idx + 1,
                 )
-                tasks.extend([
-                    connection.listen_stream_online(
-                        user.id, self._async_on_stream_online
-                    ),
-                    connection.listen_stream_offline(
-                        user.id, self._async_on_stream_offline
-                    ),
-                ])
-
-            await asyncio.gather(*tasks)
+                await connection.listen_stream_online(
+                    user.id, self._async_on_stream_online
+                )
+                LOGGER.debug(
+                    "  - stream.online subscription created for %s",
+                    user.display_name,
+                )
+                await connection.listen_stream_offline(
+                    user.id, self._async_on_stream_offline
+                )
+                LOGGER.debug(
+                    "  - stream.offline subscription created for %s",
+                    user.display_name,
+                )
         except EventSubSubscriptionError as err:
             LOGGER.warning(
                 "EventSub subscription limit exceeded for followed channels; "
