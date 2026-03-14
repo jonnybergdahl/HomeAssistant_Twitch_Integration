@@ -208,11 +208,15 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
         self._eventsub = EventSubWebsocket(self.twitch)
         await self.hass.async_add_executor_job(self._eventsub.start)
 
-    async def async_start_owner_eventsub(self) -> None:
+    async def async_start_owner_eventsub(self) -> bool:
         """Start EventSub subscriptions for the owner's channel.
 
         Always called regardless of the number of followed channels.
         Subscribes to stream online/offline, follower, and subscriber events.
+
+        Returns:
+            True if EventSub was successfully started, False if it failed and
+            polling fallback should be used.
         """
         await self._async_ensure_eventsub()
         assert self._eventsub is not None
@@ -242,20 +246,28 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
                     self._async_on_channel_subscription_gift,
                 ),
             )
-        except EventSubSubscriptionError:
+        except EventSubSubscriptionError as err:
             LOGGER.warning(
-                "EventSub subscription failed for owner; falling back to polling"
+                "EventSub subscription failed for owner (subscription limit exceeded); "
+                "falling back to polling. This may occur if the integration is running "
+                "on multiple servers or another application is using EventSub subscriptions"
             )
+            LOGGER.debug("EventSub error details: %s", err)
             await self._eventsub.stop()
             self._eventsub = None
-            return
+            return False
 
         LOGGER.debug("EventSub WebSocket started for owner")
+        return True
 
-    async def async_start_channel_eventsub(self) -> None:
+    async def async_start_channel_eventsub(self) -> bool:
         """Start EventSub subscriptions for followed channels' stream status.
 
         Only called when the number of followed channels is within limits.
+
+        Returns:
+            True if EventSub was successfully started, False if it failed and
+            polling fallback should be used.
         """
         await self._async_ensure_eventsub()
         assert self._eventsub is not None
@@ -274,17 +286,23 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
                     )
                 ),
             )
-        except EventSubSubscriptionError:
+        except EventSubSubscriptionError as err:
             LOGGER.warning(
                 "EventSub subscription limit exceeded for followed channels; "
-                "falling back to polling"
+                "falling back to polling. This may occur if the integration is running "
+                "on multiple servers or another application is using EventSub subscriptions"
             )
-            return
+            LOGGER.debug("EventSub error details: %s", err)
+            # Stop the EventSub connection since we can't use it
+            await self._eventsub.stop()
+            self._eventsub = None
+            return False
 
         LOGGER.debug(
             "EventSub WebSocket started for %d followed channel(s)",
             len(self.users),
         )
+        return True
 
     async def async_shutdown(self) -> None:
         """Stop EventSub WebSocket."""

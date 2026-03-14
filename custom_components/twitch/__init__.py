@@ -19,7 +19,14 @@ from homeassistant.helpers.config_entry_oauth2_flow import (
     async_get_config_entry_implementation,
 )
 
-from .const import CONF_CHANNELS, DOMAIN, EVENTSUB_MAX_CHANNELS, OAUTH_SCOPES, PLATFORMS
+from .const import (
+    CONF_CHANNELS,
+    DOMAIN,
+    EVENTSUB_MAX_CHANNELS,
+    LOGGER,
+    OAUTH_SCOPES,
+    PLATFORMS,
+)
 from .coordinator import TwitchConfigEntry, TwitchCoordinator
 
 
@@ -124,11 +131,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: TwitchConfigEntry) -> bo
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Owner EventSub is always started for real-time follower/subscriber updates.
-    # Followed channel EventSub is only started when within subscription limits.
+    # Followed channel EventSub is only started when within subscription limits
+    # and only if owner EventSub succeeded.
     async def _start_eventsub() -> None:
-        await coordinator.async_start_owner_eventsub()
-        if len(coordinator.users) <= EVENTSUB_MAX_CHANNELS:
+        owner_success = await coordinator.async_start_owner_eventsub()
+        # Only attempt channel EventSub if owner EventSub succeeded and we have
+        # a reasonable number of channels to track
+        if owner_success and len(coordinator.users) <= EVENTSUB_MAX_CHANNELS:
             await coordinator.async_start_channel_eventsub()
+        elif not owner_success:
+            LOGGER.info(
+                "Skipping EventSub for followed channels because owner EventSub "
+                "failed; using polling for all channels"
+            )
 
     entry.async_create_background_task(
         hass, _start_eventsub(), "twitch_eventsub_start"

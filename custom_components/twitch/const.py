@@ -29,5 +29,5 @@ OAUTH_SCOPES = [
 # Twitch allows max 10 subscriptions per WebSocket and 3 connections (30 total).
 # The owner always uses 6 (online + offline + follow + subscribe + sub_end + sub_gift).
 # Each followed channel needs 2 subscriptions (online + offline).
-# So max followed channels for EventSub = (30 - 6) / 2 = 12.
-EVENTSUB_MAX_CHANNELS = 12
+# Theoretical max: (30 - 6) / 2 = 12, but we use 10 for safety margin.
+EVENTSUB_MAX_CHANNELS = 10
