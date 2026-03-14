@@ -341,11 +341,10 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
 
         channels_subscribed = 0
         current_connection_channels = 0
-        connection_idx = -1
 
         for user in self.users:
             # If current connection is full (5 channels) or we don't have a connection yet
-            if current_connection_channels >= 5:
+            if current_connection_channels == 0 or current_connection_channels >= 5:
                 # Check if we've hit the max number of connections (2)
                 if len(self._eventsub_channels) >= 2:
                     LOGGER.debug(
@@ -354,23 +353,23 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
                     )
                     break
 
-                # Start a new connection
-                connection_idx += 1
-                current_connection_channels = 0
-
-            # Create a new connection if needed
-            if connection_idx >= len(self._eventsub_channels):
+                # Create a new connection
+                connection_num = len(self._eventsub_channels) + 1
                 try:
-                    await self._async_ensure_channels_eventsub(connection_idx + 1)
+                    await self._async_ensure_channels_eventsub(connection_num)
                 except EventSubSubscriptionError as err:
                     LOGGER.warning(
                         "Failed to create EventSub connection %d; remaining %d channel(s) will use polling",
-                        connection_idx + 1,
+                        connection_num,
                         len(self.users) - channels_subscribed,
                     )
                     LOGGER.debug("EventSub error details: %s", err)
                     break
 
+                current_connection_channels = 0
+
+            # Use the last connection in the list
+            connection_idx = len(self._eventsub_channels) - 1
             connection = self._eventsub_channels[connection_idx]
 
             try:
