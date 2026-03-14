@@ -141,7 +141,8 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
         self._last_slow_update: datetime | None = None
         self._slow_update_deferred = False
         self._stream_data: dict[str, Stream] = {}
-        self._eventsub: EventSubWebsocket | None = None
+        self._eventsub_owner: EventSubWebsocket | None = None
+        self._eventsub_channels: EventSubWebsocket | None = None
         self._owner_update: TwitchOwnerUpdate | None = None
 
     @property
@@ -197,16 +198,23 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
             async for stream in self.twitch.get_streams(user_id=chunk):
                 self._stream_data[stream.user_id] = stream
 
-    async def _async_ensure_eventsub(self) -> None:
-        """Ensure the EventSub WebSocket is started."""
-        if self._eventsub is not None:
+    async def _async_ensure_owner_eventsub(self) -> None:
+        """Ensure the owner EventSub WebSocket is started."""
+        if self._eventsub_owner is not None:
             return
         # start() is sync with a busy-wait loop so run it in the executor.
         # Don't pass callback_loop; the library's create_task call is not
         # thread-safe. Instead, callbacks run on the socket's own loop and
         # schedule HA work via asyncio.run_coroutine_threadsafe.
-        self._eventsub = EventSubWebsocket(self.twitch)
-        await self.hass.async_add_executor_job(self._eventsub.start)
+        self._eventsub_owner = EventSubWebsocket(self.twitch)
+        await self.hass.async_add_executor_job(self._eventsub_owner.start)
+
+    async def _async_ensure_channels_eventsub(self) -> None:
+        """Ensure the channels EventSub WebSocket is started."""
+        if self._eventsub_channels is not None:
+            return
+        self._eventsub_channels = EventSubWebsocket(self.twitch)
+        await self.hass.async_add_executor_job(self._eventsub_channels.start)
 
     async def async_start_owner_eventsub(self) -> bool:
         """Start EventSub subscriptions for the owner's channel.
@@ -218,30 +226,30 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
             True if EventSub was successfully started, False if it failed and
             polling fallback should be used.
         """
-        await self._async_ensure_eventsub()
-        assert self._eventsub is not None
+        await self._async_ensure_owner_eventsub()
+        assert self._eventsub_owner is not None
         try:
             await asyncio.gather(
-                self._eventsub.listen_stream_online(
+                self._eventsub_owner.listen_stream_online(
                     self.current_user.id, self._async_on_stream_online
                 ),
-                self._eventsub.listen_stream_offline(
+                self._eventsub_owner.listen_stream_offline(
                     self.current_user.id, self._async_on_stream_offline
                 ),
-                self._eventsub.listen_channel_follow_v2(
+                self._eventsub_owner.listen_channel_follow_v2(
                     self.current_user.id,
                     self.current_user.id,
                     self._async_on_channel_follow,
                 ),
-                self._eventsub.listen_channel_subscribe(
+                self._eventsub_owner.listen_channel_subscribe(
                     self.current_user.id,
                     self._async_on_channel_subscribe,
                 ),
-                self._eventsub.listen_channel_subscription_end(
+                self._eventsub_owner.listen_channel_subscription_end(
                     self.current_user.id,
                     self._async_on_channel_subscription_end,
                 ),
-                self._eventsub.listen_channel_subscription_gift(
+                self._eventsub_owner.listen_channel_subscription_gift(
                     self.current_user.id,
                     self._async_on_channel_subscription_gift,
                 ),
@@ -253,8 +261,8 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
                 "on multiple servers or another application is using EventSub subscriptions"
             )
             LOGGER.debug("EventSub error details: %s", err)
-            await self._eventsub.stop()
-            self._eventsub = None
+            await self._eventsub_owner.stop()
+            self._eventsub_owner = None
             return False
 
         LOGGER.debug("EventSub WebSocket started for owner")
@@ -269,18 +277,18 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
             True if EventSub was successfully started, False if it failed and
             polling fallback should be used.
         """
-        await self._async_ensure_eventsub()
-        assert self._eventsub is not None
+        await self._async_ensure_channels_eventsub()
+        assert self._eventsub_channels is not None
         try:
             await asyncio.gather(
                 *(
                     coro
                     for user in self.users
                     for coro in (
-                        self._eventsub.listen_stream_online(
+                        self._eventsub_channels.listen_stream_online(
                             user.id, self._async_on_stream_online
                         ),
-                        self._eventsub.listen_stream_offline(
+                        self._eventsub_channels.listen_stream_offline(
                             user.id, self._async_on_stream_offline
                         ),
                     )
@@ -294,8 +302,8 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
             )
             LOGGER.debug("EventSub error details: %s", err)
             # Stop the EventSub connection since we can't use it
-            await self._eventsub.stop()
-            self._eventsub = None
+            await self._eventsub_channels.stop()
+            self._eventsub_channels = None
             return False
 
         LOGGER.debug(
@@ -305,10 +313,13 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
         return True
 
     async def async_shutdown(self) -> None:
-        """Stop EventSub WebSocket."""
-        if self._eventsub is not None:
-            await self._eventsub.stop()
-            self._eventsub = None
+        """Stop EventSub WebSockets."""
+        if self._eventsub_owner is not None:
+            await self._eventsub_owner.stop()
+            self._eventsub_owner = None
+        if self._eventsub_channels is not None:
+            await self._eventsub_channels.stop()
+            self._eventsub_channels = None
 
     async def _async_on_stream_online(self, event: StreamOnlineEvent) -> None:
         """Handle stream.online event from EventSub (runs on socket thread)."""
