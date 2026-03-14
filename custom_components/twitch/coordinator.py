@@ -216,9 +216,17 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
             count: Number of WebSocket connections needed (max 2).
         """
         count = min(count, 2)  # Maximum 2 connections for channels (3 total with owner)
+        LOGGER.debug(
+            "Creating %d channel EventSub connection(s) (%d already exist)",
+            count - len(self._eventsub_channels),
+            len(self._eventsub_channels),
+        )
         while len(self._eventsub_channels) < count:
+            connection_num = len(self._eventsub_channels) + 1
+            LOGGER.debug("Starting channel EventSub connection %d", connection_num)
             websocket = EventSubWebsocket(self.twitch)
             await self.hass.async_add_executor_job(websocket.start)
+            LOGGER.debug("Channel EventSub connection %d started successfully", connection_num)
             self._eventsub_channels.append(websocket)
 
     async def async_start_owner_eventsub(self) -> bool:
@@ -288,15 +296,28 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
         num_channels = len(self.users)
         num_connections = min(2, (num_channels + 4) // 5)  # Ceiling division, max 2
 
-        await self._async_ensure_channels_eventsub(num_connections)
-        assert len(self._eventsub_channels) > 0
-
         try:
+            await self._async_ensure_channels_eventsub(num_connections)
+            assert len(self._eventsub_channels) > 0
+
+            LOGGER.debug(
+                "Starting EventSub subscriptions for %d channel(s) using %d connection(s)",
+                num_channels,
+                num_connections,
+            )
+
             # Distribute channels across connections
             tasks = []
             for idx, user in enumerate(self.users):
                 # Round-robin distribution across available connections
-                connection = self._eventsub_channels[idx % len(self._eventsub_channels)]
+                connection_idx = idx % len(self._eventsub_channels)
+                connection = self._eventsub_channels[connection_idx]
+                LOGGER.debug(
+                    "Subscribing to channel %s (%s) on connection %d",
+                    user.display_name,
+                    user.id,
+                    connection_idx + 1,
+                )
                 tasks.extend([
                     connection.listen_stream_online(
                         user.id, self._async_on_stream_online
