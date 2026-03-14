@@ -18,6 +18,7 @@ CONF_REFRESH_TOKEN = "refresh_token"
 DOMAIN = "twitch"
 CONF_ALL_CHANNELS = "all_channels"
 CONF_CHANNELS = "channels"
+CONF_TOKEN = "token"
 
 OAUTH_SCOPES = [
     AuthScope.CHANNEL_READ_SUBSCRIPTIONS,
@@ -26,8 +27,9 @@ OAUTH_SCOPES = [
     AuthScope.USER_READ_FOLLOWS,
 ]
 
-# Twitch allows max 10 subscriptions per WebSocket and 3 connections (30 total).
-# The owner always uses 6 (online + offline + follow + subscribe + sub_end + sub_gift).
+# Twitch allows max 10 subscriptions per WebSocket connection and 3 connections total.
+# The owner uses 1 connection with 6 subscriptions (online + offline + follow + subscribe + sub_end + sub_gift).
 # Each followed channel needs 2 subscriptions (online + offline).
-# Theoretical max: (30 - 6) / 2 = 12, but we use 10 for safety margin.
+# We use up to 2 additional connections for channels (5 channels each = 10 subscriptions).
+# Max with EventSub: 2 connections × 5 channels = 10 channels. Beyond that, we fall back to polling.
 EVENTSUB_MAX_CHANNELS = 10

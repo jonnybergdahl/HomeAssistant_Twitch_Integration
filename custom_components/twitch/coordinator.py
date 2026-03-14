@@ -36,7 +36,16 @@ from homeassistant.helpers.config_entry_oauth2_flow import OAuth2Session
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import CONF_ALL_CHANNELS, CONF_CHANNELS, DOMAIN, LOGGER, OAUTH_SCOPES
+from .const import (
+    CONF_ALL_CHANNELS,
+    CONF_CHANNELS,
+    CONF_TOKEN,
+    DOMAIN,
+    LOGGER,
+    OAUTH_SCOPES,
+)
+
+from homeassistant.const import CONF_ACCESS_TOKEN
 
 type TwitchConfigEntry = ConfigEntry[TwitchCoordinator]
 
@@ -143,6 +152,7 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
         self._stream_data: dict[str, Stream] = {}
         self._eventsub_owner: EventSubWebsocket | None = None
         self._eventsub_channels: list[EventSubWebsocket] = []
+        self._channel_clients: list[Twitch] = []
         self._owner_update: TwitchOwnerUpdate | None = None
 
     @property
@@ -198,6 +208,28 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
             async for stream in self.twitch.get_streams(user_id=chunk):
                 self._stream_data[stream.user_id] = stream
 
+    async def _create_authenticated_client(self) -> Twitch:
+        """Create a new authenticated Twitch client instance.
+
+        Each client gets its own EventSub WebSocket connection.
+        """
+        from homeassistant.helpers.config_entry_oauth2_flow import (
+            async_get_config_entry_implementation,
+        )
+
+        implementation = await async_get_config_entry_implementation(
+            self.hass, self.config_entry
+        )
+        access_token = self.config_entry.data[CONF_TOKEN][CONF_ACCESS_TOKEN]
+
+        client = Twitch(
+            app_id=implementation.client_id,
+            authenticate_app=False,
+        )
+        client.auto_refresh_auth = False
+        await client.set_user_authentication(access_token, scope=OAUTH_SCOPES)
+        return client
+
     async def _async_ensure_owner_eventsub(self) -> None:
         """Ensure the owner EventSub WebSocket is started."""
         if self._eventsub_owner is not None:
@@ -208,9 +240,13 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
         # schedule HA work via asyncio.run_coroutine_threadsafe.
         self._eventsub_owner = EventSubWebsocket(self.twitch)
         await self.hass.async_add_executor_job(self._eventsub_owner.start)
+        LOGGER.debug("Owner EventSub WebSocket connection started")
 
     async def _async_ensure_channels_eventsub(self, count: int) -> None:
         """Ensure the required number of channel EventSub WebSockets are started.
+
+        Each connection uses a separate Twitch client instance to ensure
+        they get truly separate WebSocket connections.
 
         Args:
             count: Number of WebSocket connections needed (max 2).
@@ -223,8 +259,14 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
         )
         while len(self._eventsub_channels) < count:
             connection_num = len(self._eventsub_channels) + 1
+            LOGGER.debug("Creating separate Twitch client for channel connection %d", connection_num)
+
+            # Create a new Twitch client for this connection
+            client = await self._create_authenticated_client()
+            self._channel_clients.append(client)
+
             LOGGER.debug("Starting channel EventSub connection %d", connection_num)
-            websocket = EventSubWebsocket(self.twitch)
+            websocket = EventSubWebsocket(client)
             await self.hass.async_add_executor_job(websocket.start)
             LOGGER.debug("Channel EventSub connection %d started successfully", connection_num)
             self._eventsub_channels.append(websocket)
@@ -278,39 +320,60 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
             self._eventsub_owner = None
             return False
 
-        LOGGER.debug("EventSub WebSocket started for owner")
+        LOGGER.debug("EventSub subscriptions created for owner (6 subscriptions)")
         return True
 
     async def async_start_channel_eventsub(self) -> bool:
         """Start EventSub subscriptions for followed channels' stream status.
 
-        Only called when the number of followed channels is within limits.
-        Distributes channels across up to 2 WebSocket connections, with each
-        connection supporting up to 5 channels (10 points / 2 points per channel).
+        Creates connections on-demand as needed, filling each to capacity (5 channels)
+        before creating a new one. Supports up to 2 connections (10 channels total).
+        Remaining channels fall back to polling.
 
         Returns:
-            True if EventSub was successfully started, False if it failed and
-            polling fallback should be used.
+            True if EventSub was successfully started for at least some channels,
+            False if it completely failed.
         """
-        # Calculate how many connections we need (5 channels per connection max, 2 connections max)
-        num_channels = len(self.users)
-        num_connections = min(2, (num_channels + 4) // 5)  # Ceiling division, max 2
+        LOGGER.debug(
+            "Starting EventSub subscriptions for %d channel(s)",
+            len(self.users),
+        )
 
-        try:
-            await self._async_ensure_channels_eventsub(num_connections)
-            assert len(self._eventsub_channels) > 0
+        channels_subscribed = 0
+        current_connection_channels = 0
+        connection_idx = -1
 
-            LOGGER.debug(
-                "Starting EventSub subscriptions for %d channel(s) using %d connection(s)",
-                num_channels,
-                num_connections,
-            )
+        for user in self.users:
+            # If current connection is full (5 channels) or we don't have a connection yet
+            if current_connection_channels >= 5:
+                # Check if we've hit the max number of connections (2)
+                if len(self._eventsub_channels) >= 2:
+                    LOGGER.debug(
+                        "Reached maximum EventSub connections (2), remaining %d channel(s) will use polling",
+                        len(self.users) - channels_subscribed,
+                    )
+                    break
 
-            # Distribute channels across connections
-            for idx, user in enumerate(self.users):
-                # Round-robin distribution across available connections
-                connection_idx = idx % len(self._eventsub_channels)
-                connection = self._eventsub_channels[connection_idx]
+                # Start a new connection
+                connection_idx += 1
+                current_connection_channels = 0
+
+            # Create a new connection if needed
+            if connection_idx >= len(self._eventsub_channels):
+                try:
+                    await self._async_ensure_channels_eventsub(connection_idx + 1)
+                except EventSubSubscriptionError as err:
+                    LOGGER.warning(
+                        "Failed to create EventSub connection %d; remaining %d channel(s) will use polling",
+                        connection_idx + 1,
+                        len(self.users) - channels_subscribed,
+                    )
+                    LOGGER.debug("EventSub error details: %s", err)
+                    break
+
+            connection = self._eventsub_channels[connection_idx]
+
+            try:
                 LOGGER.debug(
                     "Subscribing to channel %s (%s) on connection %d",
                     user.display_name,
@@ -331,25 +394,44 @@ class TwitchCoordinator(DataUpdateCoordinator[dict[str, TwitchUpdate]]):
                     "  - stream.offline subscription created for %s",
                     user.display_name,
                 )
-        except EventSubSubscriptionError as err:
-            LOGGER.warning(
-                "EventSub subscription limit exceeded for followed channels; "
-                "falling back to polling. This may occur if the integration is running "
-                "on multiple servers or another application is using EventSub subscriptions"
-            )
-            LOGGER.debug("EventSub error details: %s", err)
-            # Stop all channel EventSub connections
-            for websocket in self._eventsub_channels:
-                await websocket.stop()
-            self._eventsub_channels = []
-            return False
+                channels_subscribed += 1
+                current_connection_channels += 1
+            except EventSubSubscriptionError as err:
+                LOGGER.warning(
+                    "EventSub subscription limit exceeded at channel %s on connection %d; "
+                    "remaining %d channel(s) will use polling",
+                    user.display_name,
+                    connection_idx + 1,
+                    len(self.users) - channels_subscribed,
+                )
+                LOGGER.debug("EventSub error details: %s", err)
+                # Move to next connection if we haven't hit the limit
+                if len(self._eventsub_channels) < 2:
+                    current_connection_channels = 5  # Force creation of new connection
+                else:
+                    break
 
-        LOGGER.debug(
-            "EventSub WebSocket started for %d followed channel(s) across %d connection(s)",
+        if channels_subscribed > 0:
+            LOGGER.debug(
+                "EventSub subscriptions created for %d followed channel(s) across %d connection(s)",
+                channels_subscribed,
+                len(self._eventsub_channels),
+            )
+            if channels_subscribed < len(self.users):
+                LOGGER.info(
+                    "%d of %d followed channels using EventSub; remaining %d using polling",
+                    channels_subscribed,
+                    len(self.users),
+                    len(self.users) - channels_subscribed,
+                )
+            return True
+
+        LOGGER.warning(
+            "Failed to create any EventSub subscriptions for followed channels; "
+            "all %d channel(s) will use polling",
             len(self.users),
-            len(self._eventsub_channels),
         )
-        return True
+        return False
 
     async def async_shutdown(self) -> None:
         """Stop EventSub WebSockets."""
